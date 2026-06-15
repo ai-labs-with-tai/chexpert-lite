@@ -9,7 +9,7 @@ def get_resnet50_model(num_classes=1):
     """
     Returns a ResNet50 model with the specified number of output classes.
     """
-    model = models.resnet50(pretrained=False)
+    model = models.resnet50(weights=None)
     num_ftrs = model.fc.in_features
     model.fc = nn.Linear(num_ftrs, num_classes)
     return model
@@ -22,7 +22,12 @@ def load_weights(model, weights_path):
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
         
-    state_dict = torch.load(weights_path, map_location='cpu')
+    checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
+    
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
     
     # Handle case where model was saved with DataParallel
     new_state_dict = {}
