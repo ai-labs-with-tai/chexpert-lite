@@ -9,10 +9,15 @@ from model_utils import (
     load_weights, 
     preprocess_image, 
     predict,
-    predict_multilabel
+    predict_multilabel,
+    generate_gradcam_visualization
 )
 
 st.set_page_config(page_title="Demo CheXpert DAM vs CE", layout="wide", page_icon="🫁")
+
+# Initialize session state for Grad-CAM model selection
+if 'gradcam_model_choice' not in st.session_state:
+    st.session_state.gradcam_model_choice = "DAM (Optimized)"
 
 # Define the root directory of the project
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -81,6 +86,15 @@ st.sidebar.info(f"🎯 Ngưỡng hiện tại: **{threshold:.2f}**\n\n"
                 f"- **< {threshold:.2f}**: Khả năng thấp\n"
                 f"- **≥ {threshold:.2f}**: Khả năng cao")
 
+# Grad-CAM Settings
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 Grad-CAM Visualization")
+enable_gradcam = st.sidebar.checkbox(
+    "Hiển thị vùng quan sát của Model",
+    value=True,
+    help="Grad-CAM hiển thị vùng mà model đang chú ý để đưa ra dự đoán"
+)
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Tải Ảnh Lên")
 uploaded_file = st.sidebar.file_uploader("Chọn một ảnh X-quang ngực...", type=["jpg", "jpeg", "png"])
@@ -129,10 +143,11 @@ def load_models(disease, base_path):
 @st.cache_resource
 def load_densenet121_model(base_path):
     """Load DenseNet121 model for multi-label classification"""
-    model_path = os.path.join(base_path, "CheXpert_DAM", "Densenet121", "best_densenet.pth")
+    model_path = os.path.join(base_path, "CheXpert_DAM", "Densenet121", "best_densenet_exp1.pth")
     
     try:
-        model = get_densenet121_model(num_classes=5)
+        # exp1 model uses Dropout layer
+        model = get_densenet121_model(num_classes=5, use_dropout=True)
         model = load_weights(model, model_path)
         return model
     except Exception as e:
@@ -172,7 +187,7 @@ if uploaded_file is not None:
     with col1:
         st.subheader("Ảnh Đã Tải Lên")
         image = Image.open(uploaded_file)
-        st.image(image, caption="Ảnh X-quang ngực", use_column_width=True)
+        st.image(image, caption="Ảnh X-quang ngực", use_container_width=True)
         
     with col2:
         st.subheader("So Sánh Mô Hình" if mode == "Một Bệnh Lý (So sánh chi tiết)" else "Kết Quả Đa Nhãn")
@@ -196,11 +211,15 @@ if uploaded_file is not None:
                             interpretation, icon, color = interpret_probability(prob, threshold)
                             interpreted_results.append({
                                 "Bệnh lý": get_vn_name(disease),
+                                "Disease_EN": disease,
                                 "Xác suất": prob,
                                 "Đánh giá": f"{icon} {interpretation}"
                             })
                         
-                        df_results = pd.DataFrame(interpreted_results).set_index("Bệnh lý")
+                        # Sort by probability descending
+                        interpreted_results = sorted(interpreted_results, key=lambda x: x["Xác suất"], reverse=True)
+                        
+                        df_results = pd.DataFrame(interpreted_results)
                         
                         # Display summary statistics
                         high_risk_count = sum(1 for r in interpreted_results if "Khả năng cao" in r["Đánh giá"])
@@ -214,22 +233,62 @@ if uploaded_file is not None:
                             st.success("✅ **Tất cả các bệnh lý đều ở mức khả năng thấp**")
                         
                         st.markdown("### 📊 Bảng Xác Suất Chi Tiết")
+                        display_df = df_results[["Bệnh lý", "Xác suất", "Đánh giá"]].set_index("Bệnh lý")
                         st.dataframe(
-                            df_results.style.format({"Xác suất": "{:.2%}"}),
+                            display_df.style.format({"Xác suất": "{:.2%}"}),
                             use_container_width=True
                         )
                         
                         st.markdown("### 📈 Biểu Đồ So Sánh Trực Quan")
-                        # Create color-coded bar chart
                         chart_data = pd.DataFrame({
                             "Xác suất": [r["Xác suất"] for r in interpreted_results]
                         }, index=[r["Bệnh lý"] for r in interpreted_results])
                         st.bar_chart(chart_data)
                         
-                        # Add threshold line visualization
-                        st.markdown(f"<div style='border-top: 2px dashed red; margin-top: -20px; margin-bottom: 10px;'>"
-                                   f"<small style='color: red;'>Ngưỡng: {threshold:.0%}</small></div>", 
-                                   unsafe_allow_html=True)
+                        # Grad-CAM Visualization
+                        if enable_gradcam:
+                            st.markdown("---")
+                            st.markdown("### 🔍 Grad-CAM: Vùng Mà Model Đang Chú Ý")
+                            st.info("💡 **Grad-CAM** (Gradient-weighted Class Activation Mapping) hiển thị vùng ảnh mà model tập trung để đưa ra dự đoán. "
+                                   "Màu **đỏ/vàng** = quan trọng nhất, màu **xanh/tím** = ít quan trọng.")
+                            
+                            # Select disease for Grad-CAM
+                            disease_names = [r["Bệnh lý"] for r in interpreted_results]
+                            selected_disease_gradcam = st.selectbox(
+                                "Chọn bệnh lý để hiển thị Grad-CAM:",
+                                disease_names,
+                                key="densenet_disease_selector",
+                                help="Chọn bệnh lý để xem vùng mà model chú ý cho bệnh đó"
+                            )
+                            
+                            # Get disease index
+                            selected_idx = disease_names.index(selected_disease_gradcam)
+                            disease_class_idx = selected_idx  # For DenseNet multi-label
+                            
+                            with st.spinner(f"Đang tạo Grad-CAM cho {selected_disease_gradcam}..."):
+                                overlay, heatmap, cam = generate_gradcam_visualization(
+                                    model, image, img_tensor, class_idx=disease_class_idx
+                                )
+                                
+                                if overlay is not None:
+                                    gradcam_cols = st.columns(3)
+                                    
+                                    with gradcam_cols[0]:
+                                        st.markdown("**Ảnh Gốc**")
+                                        st.image(image, use_container_width=True)
+                                    
+                                    with gradcam_cols[1]:
+                                        st.markdown("**Heatmap**")
+                                        st.image(heatmap, use_container_width=True)
+                                    
+                                    with gradcam_cols[2]:
+                                        st.markdown("**Overlay**")
+                                        st.image(overlay, use_container_width=True)
+                                    
+                                    st.caption(f"🎯 Grad-CAM cho bệnh lý: **{selected_disease_gradcam}** "
+                                             f"(Xác suất: {interpreted_results[selected_idx]['Xác suất']:.1%})")
+                                else:
+                                    st.error("Không thể tạo Grad-CAM. Vui lòng thử lại.")
                         
                         st.success("Dự đoán đa nhãn hoàn tất!")
                         st.info("✨ **Mô hình DenseNet121** được huấn luyện để dự đoán đồng thời 5 bệnh lý từ một ảnh X-quang. "
@@ -276,6 +335,67 @@ if uploaded_file is not None:
                                 st.success(f"✅ Mô hình DAM đánh giá xác suất cao hơn CE: **+{diff:.2%}**")
                             else:
                                 st.warning(f"⚠️ Mô hình CE đánh giá xác suất cao hơn DAM: **+{abs(diff):.2%}**")
+                        
+                        # Grad-CAM Visualization
+                        if enable_gradcam and model_dam is not None:
+                            st.markdown("---")
+                            st.markdown("### 🔍 Grad-CAM: Vùng Mà Model Đang Chú Ý")
+                            st.info("💡 **Grad-CAM** hiển thị vùng ảnh mà model tập trung để đưa ra dự đoán. "
+                                   "So sánh giữa 2 mô hình để thấy sự khác biệt trong cách nhìn của chúng.")
+                            
+                            # Use session state to persist choice without reloading
+                            available_models = ["DAM (Optimized)", "CE (Baseline)"] if model_ce else ["DAM (Optimized)"]
+                            
+                            # Create columns for model selection and visualization
+                            model_col, _ = st.columns([1, 2])
+                            
+                            with model_col:
+                                # Radio button with session state
+                                def update_model_choice():
+                                    st.session_state.gradcam_model_choice = st.session_state.temp_model_choice
+                                
+                                current_choice = st.session_state.gradcam_model_choice
+                                if current_choice not in available_models:
+                                    current_choice = available_models[0]
+                                    st.session_state.gradcam_model_choice = current_choice
+                                
+                                st.radio(
+                                    "Chọn model để xem Grad-CAM:",
+                                    available_models,
+                                    index=available_models.index(current_choice),
+                                    key="temp_model_choice",
+                                    on_change=update_model_choice,
+                                    horizontal=True
+                                )
+                            
+                            selected_model = model_dam if "DAM" in st.session_state.gradcam_model_choice else model_ce
+                            
+                            with st.spinner(f"Đang tạo Grad-CAM cho {selected_disease_vn}..."):
+                                overlay, heatmap, cam = generate_gradcam_visualization(
+                                    selected_model, image, img_tensor, class_idx=None
+                                )
+                                
+                                if overlay is not None:
+                                    gradcam_cols = st.columns(3)
+                                    
+                                    with gradcam_cols[0]:
+                                        st.markdown("**Ảnh Gốc**")
+                                        st.image(image, use_container_width=True)
+                                    
+                                    with gradcam_cols[1]:
+                                        st.markdown("**Heatmap**")
+                                        st.image(heatmap, use_container_width=True)
+                                    
+                                    with gradcam_cols[2]:
+                                        st.markdown("**Overlay**")
+                                        st.image(overlay, use_container_width=True)
+                                    
+                                    prob_display = prob_dam if "DAM" in st.session_state.gradcam_model_choice else prob_ce
+                                    st.caption(f"🎯 Grad-CAM từ model **{st.session_state.gradcam_model_choice}** "
+                                             f"cho bệnh lý: **{selected_disease_vn}** "
+                                             f"(Xác suất: {prob_display:.1%})")
+                                else:
+                                    st.error("Không thể tạo Grad-CAM. Vui lòng thử lại.")
                         
                         st.success("Dự đoán hoàn tất!")
                         st.info("💡 **Lưu ý:** Mô hình DAM được tối ưu hóa cho AUC (Area Under ROC Curve), "

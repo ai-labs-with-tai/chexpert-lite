@@ -2,8 +2,11 @@ import os
 import torch
 import torchvision.models as models
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms
 from PIL import Image
+import numpy as np
+import cv2
 
 def get_resnet50_model(num_classes=1):
     """
@@ -14,14 +17,27 @@ def get_resnet50_model(num_classes=1):
     model.fc = nn.Linear(num_ftrs, num_classes)
     return model
 
-def get_densenet121_model(num_classes=5):
+def get_densenet121_model(num_classes=5, use_dropout=False):
     """
     Returns a DenseNet121 model with the specified number of output classes.
     For multi-label classification (5 diseases).
+    Args:
+        num_classes: number of output classes
+        use_dropout: if True, add Dropout layer before final Linear (for exp1 model)
     """
     model = models.densenet121(weights=None)
     num_ftrs = model.classifier.in_features
-    model.classifier = nn.Linear(num_ftrs, num_classes)
+    
+    if use_dropout:
+        # Architecture with Dropout (like exp1 model)
+        model.classifier = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(num_ftrs, num_classes)
+        )
+    else:
+        # Simple Linear layer
+        model.classifier = nn.Linear(num_ftrs, num_classes)
+    
     return model
 
 def load_weights(model, weights_path):
@@ -148,3 +164,162 @@ def predict_multilabel(model, image_tensor):
         
     # Return as dictionary
     return {disease_names[i]: float(probs[i]) for i in range(len(disease_names))}
+
+
+class GradCAM:
+    """
+    Grad-CAM implementation for visualizing what the model is looking at
+    """
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        
+        # Register hooks
+        self.target_layer.register_forward_hook(self.save_activation)
+        self.target_layer.register_backward_hook(self.save_gradient)
+    
+    def save_activation(self, module, input, output):
+        self.activations = output.detach()
+    
+    def save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0].detach()
+    
+    def generate_cam(self, input_tensor, target_class=None):
+        """
+        Generate CAM for a given input
+        Args:
+            input_tensor: preprocessed image tensor (1, 3, H, W)
+            target_class: class index to generate CAM for (None for highest score)
+        Returns:
+            cam: numpy array of the CAM, normalized to [0, 1]
+        """
+        self.model.eval()
+        
+        # Forward pass
+        output = self.model(input_tensor)
+        
+        # Get target class
+        if target_class is None:
+            target_class = output.argmax(dim=1).item()
+        
+        # Zero gradients
+        self.model.zero_grad()
+        
+        # Backward pass
+        if output.dim() == 2 and output.shape[1] == 1:
+            # Binary classification (single output)
+            target = output[0, 0]
+        else:
+            # Multi-class
+            target = output[0, target_class]
+        
+        target.backward()
+        
+        # Get gradients and activations
+        gradients = self.gradients[0].cpu().numpy()  # (C, H, W)
+        activations = self.activations[0].cpu().numpy()  # (C, H, W)
+        
+        # Weight the channels by gradient
+        weights = np.mean(gradients, axis=(1, 2))  # (C,)
+        
+        # Create CAM
+        cam = np.zeros(activations.shape[1:], dtype=np.float32)
+        for i, w in enumerate(weights):
+            cam += w * activations[i]
+        
+        # Apply ReLU
+        cam = np.maximum(cam, 0)
+        
+        # Normalize
+        if cam.max() > 0:
+            cam = cam / cam.max()
+        
+        return cam
+
+def get_gradcam_layer(model):
+    """
+    Get the appropriate layer for Grad-CAM based on model architecture
+    """
+    if isinstance(model, models.ResNet):
+        # For ResNet, use the last conv layer
+        return model.layer4[-1].conv3 if hasattr(model.layer4[-1], 'conv3') else model.layer4[-1].conv2
+    elif isinstance(model, models.DenseNet):
+        # For DenseNet, use features.denseblock4
+        return model.features.denseblock4
+    else:
+        raise ValueError(f"Unsupported model type: {type(model)}")
+
+def apply_gradcam_overlay(original_image, cam, alpha=0.4, colormap=cv2.COLORMAP_JET):
+    """
+    Apply Grad-CAM heatmap overlay on original image
+    Args:
+        original_image: PIL Image or numpy array (H, W, 3)
+        cam: numpy array of CAM (h, w)
+        alpha: transparency of overlay (0-1)
+        colormap: OpenCV colormap
+    Returns:
+        PIL Image with overlay
+    """
+    # Convert PIL to numpy if needed
+    if isinstance(original_image, Image.Image):
+        original_image = np.array(original_image)
+    
+    # Ensure RGB
+    if len(original_image.shape) == 2:
+        original_image = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+    elif original_image.shape[2] == 4:
+        original_image = cv2.cvtColor(original_image, cv2.COLOR_RGBA2RGB)
+    
+    # Resize CAM to match image size
+    h, w = original_image.shape[:2]
+    cam_resized = cv2.resize(cam, (w, h))
+    
+    # Convert CAM to heatmap
+    cam_uint8 = np.uint8(255 * cam_resized)
+    heatmap = cv2.applyColorMap(cam_uint8, colormap)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    
+    # Overlay
+    overlayed = cv2.addWeighted(original_image, 1 - alpha, heatmap, alpha, 0)
+    
+    return Image.fromarray(overlayed)
+
+def generate_gradcam_visualization(model, image, image_tensor, class_idx=None):
+    """
+    Generate Grad-CAM visualization for a model prediction
+    Args:
+        model: trained model
+        image: original PIL Image
+        image_tensor: preprocessed tensor for model
+        class_idx: class index (for multi-class), None for binary
+    Returns:
+        tuple: (cam_overlay, cam_heatmap, raw_cam)
+    """
+    try:
+        # Get appropriate layer
+        target_layer = get_gradcam_layer(model)
+        
+        # Create Grad-CAM object
+        gradcam = GradCAM(model, target_layer)
+        
+        # Generate CAM
+        cam = gradcam.generate_cam(image_tensor, target_class=class_idx)
+        
+        # Create overlay
+        overlay = apply_gradcam_overlay(image, cam, alpha=0.4)
+        
+        # Create pure heatmap
+        h, w = np.array(image).shape[:2]
+        cam_resized = cv2.resize(cam, (w, h))
+        cam_uint8 = np.uint8(255 * cam_resized)
+        heatmap = cv2.applyColorMap(cam_uint8, cv2.COLORMAP_JET)
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        heatmap_pil = Image.fromarray(heatmap)
+        
+        return overlay, heatmap_pil, cam
+    
+    except Exception as e:
+        print(f"Error generating Grad-CAM: {e}")
+        return None, None, None

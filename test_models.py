@@ -41,18 +41,18 @@ def test_model_loading():
     print("KIỂM TRA DENSENET121 MODEL")
     print("=" * 60)
     
-    densenet_path = os.path.join(base_path, "CheXpert_DAM", "Densenet121", "best_densenet.pth")
+    densenet_path = os.path.join(base_path, "CheXpert_DAM", "Densenet121", "best_densenet_exp1.pth")
     print(f"\nDenseNet121: {'✓' if os.path.exists(densenet_path) else '✗'} {densenet_path}")
     
     # Try loading DenseNet121
     if os.path.exists(densenet_path):
         try:
             print("\nĐang thử load DenseNet121...")
-            model = get_densenet121_model(num_classes=5)
+            model = get_densenet121_model(num_classes=5, use_dropout=True)
             model = load_weights(model, densenet_path)
             print("✓ Load DenseNet121 thành công!")
             print(f"  - Model architecture: {model.__class__.__name__}")
-            print(f"  - Classifier output: {model.classifier.out_features} classes")
+            print(f"  - Classifier: {model.classifier}")
         except Exception as e:
             print(f"✗ Lỗi khi load DenseNet121: {e}")
     

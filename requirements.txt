@@ -4,3 +4,5 @@ torchvision
 Pillow
 pandas
 matplotlib
+opencv-python
+numpy
