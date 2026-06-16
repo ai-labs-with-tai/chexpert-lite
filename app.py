@@ -139,6 +139,32 @@ def load_densenet121_model(base_path):
         st.error(f"Không thể tải mô hình DenseNet121: {e}")
         return None
 
+def interpret_probability(prob, threshold):
+    """
+    Interpret probability based on threshold
+    Returns: (interpretation, color, icon)
+    """
+    if prob >= threshold:
+        return "Khả năng cao", "🔴", "#ff4444"
+    elif prob >= threshold * 0.7:  # Between 70% and 100% of threshold
+        return "Cần theo dõi", "🟡", "#ffaa00"
+    else:
+        return "Khả năng thấp", "🟢", "#00cc66"
+
+def display_probability_with_interpretation(prob, threshold, label="Xác suất"):
+    """Display probability with color-coded interpretation"""
+    interpretation, icon, color = interpret_probability(prob, threshold)
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.metric(label=label, value=f"{prob:.2%}")
+        st.progress(prob)
+    with col2:
+        st.markdown(f"<div style='text-align: center; padding: 10px;'>"
+                   f"<h3 style='color: {color};'>{icon}</h3>"
+                   f"<p style='color: {color}; font-weight: bold;'>{interpretation}</p>"
+                   f"</div>", unsafe_allow_html=True)
+
 
 if uploaded_file is not None:
     col1, col2 = st.columns([1, 2])
@@ -164,23 +190,50 @@ if uploaded_file is not None:
                     else:
                         results = predict_multilabel(model, img_tensor)
                         
-                        # Create DataFrame with Vietnamese names
-                        df_results = pd.DataFrame([
-                            {
+                        # Create results with interpretation
+                        interpreted_results = []
+                        for disease, prob in results.items():
+                            interpretation, icon, color = interpret_probability(prob, threshold)
+                            interpreted_results.append({
                                 "Bệnh lý": get_vn_name(disease),
-                                "Xác suất": prob
-                            }
-                            for disease, prob in results.items()
-                        ]).set_index("Bệnh lý")
+                                "Xác suất": prob,
+                                "Đánh giá": f"{icon} {interpretation}"
+                            })
                         
-                        st.markdown("### Bảng Xác Suất Dự Đoán")
-                        st.dataframe(df_results.style.format({"Xác suất": "{:.2%}"}), use_container_width=True)
+                        df_results = pd.DataFrame(interpreted_results).set_index("Bệnh lý")
                         
-                        st.markdown("### Biểu Đồ So Sánh Trực Quan")
-                        st.bar_chart(df_results)
+                        # Display summary statistics
+                        high_risk_count = sum(1 for r in interpreted_results if "Khả năng cao" in r["Đánh giá"])
+                        medium_risk_count = sum(1 for r in interpreted_results if "Cần theo dõi" in r["Đánh giá"])
+                        
+                        if high_risk_count > 0:
+                            st.error(f"⚠️ **Phát hiện {high_risk_count} bệnh lý có khả năng cao** (≥ {threshold:.0%})")
+                        elif medium_risk_count > 0:
+                            st.warning(f"⚠️ **Có {medium_risk_count} bệnh lý cần theo dõi**")
+                        else:
+                            st.success("✅ **Tất cả các bệnh lý đều ở mức khả năng thấp**")
+                        
+                        st.markdown("### 📊 Bảng Xác Suất Chi Tiết")
+                        st.dataframe(
+                            df_results.style.format({"Xác suất": "{:.2%}"}),
+                            use_container_width=True
+                        )
+                        
+                        st.markdown("### 📈 Biểu Đồ So Sánh Trực Quan")
+                        # Create color-coded bar chart
+                        chart_data = pd.DataFrame({
+                            "Xác suất": [r["Xác suất"] for r in interpreted_results]
+                        }, index=[r["Bệnh lý"] for r in interpreted_results])
+                        st.bar_chart(chart_data)
+                        
+                        # Add threshold line visualization
+                        st.markdown(f"<div style='border-top: 2px dashed red; margin-top: -20px; margin-bottom: 10px;'>"
+                                   f"<small style='color: red;'>Ngưỡng: {threshold:.0%}</small></div>", 
+                                   unsafe_allow_html=True)
                         
                         st.success("Dự đoán đa nhãn hoàn tất!")
-                        st.info("✨ Mô hình DenseNet121 được huấn luyện để dự đoán đồng thời 5 bệnh lý từ một ảnh X-quang.")
+                        st.info("✨ **Mô hình DenseNet121** được huấn luyện để dự đoán đồng thời 5 bệnh lý từ một ảnh X-quang. "
+                               f"Ngưỡng phân loại hiện tại: **{threshold:.0%}**")
             
             # ResNet50 Mode
             elif mode == "Một Bệnh Lý (So sánh chi tiết)":
@@ -191,12 +244,15 @@ if uploaded_file is not None:
                         st.error("Không thể tải cả hai mô hình. Vui lòng kiểm tra lại các file trọng số.")
                     else:
                         res_cols = st.columns(2)
+                        
+                        prob_ce = None
+                        prob_dam = None
+                        
                         with res_cols[0]:
                             st.markdown("### 🟦 Baseline (CE)")
                             if model_ce:
                                 prob_ce = predict(model_ce, img_tensor)
-                                st.metric(label="Xác suất", value=f"{prob_ce:.2%}")
-                                st.progress(prob_ce)
+                                display_probability_with_interpretation(prob_ce, threshold, "Xác suất")
                             else:
                                 st.write("Mô hình không khả dụng.")
                                 
@@ -204,13 +260,27 @@ if uploaded_file is not None:
                             st.markdown("### 🟧 Optimized (DAM)")
                             if model_dam:
                                 prob_dam = predict(model_dam, img_tensor)
-                                st.metric(label="Xác suất", value=f"{prob_dam:.2%}")
-                                st.progress(prob_dam)
+                                display_probability_with_interpretation(prob_dam, threshold, "Xác suất")
                             else:
                                 st.write("Mô hình không khả dụng.")
-                                
+                        
+                        # Comparison summary
+                        if prob_ce is not None and prob_dam is not None:
+                            st.markdown("---")
+                            st.markdown("### 📊 So Sánh Kết Quả")
+                            
+                            diff = prob_dam - prob_ce
+                            if abs(diff) < 0.01:
+                                st.info(f"Cả hai mô hình cho kết quả tương đương (~{prob_dam:.1%})")
+                            elif diff > 0:
+                                st.success(f"✅ Mô hình DAM đánh giá xác suất cao hơn CE: **+{diff:.2%}**")
+                            else:
+                                st.warning(f"⚠️ Mô hình CE đánh giá xác suất cao hơn DAM: **+{abs(diff):.2%}**")
+                        
                         st.success("Dự đoán hoàn tất!")
-                        st.info("Lưu ý: Mô hình DAM được tối ưu hóa cho Area Under the ROC Curve (AUC), giúp mô hình phân định xác suất bệnh lý tốt hơn so với Cross-Entropy tiêu chuẩn.")
+                        st.info("💡 **Lưu ý:** Mô hình DAM được tối ưu hóa cho AUC (Area Under ROC Curve), "
+                               "giúp phân định xác suất bệnh lý tốt hơn so với Cross-Entropy tiêu chuẩn. "
+                               f"Ngưỡng phân loại hiện tại: **{threshold:.0%}**")
             
             # ResNet50 Multi-label mode
             elif mode == "Đa Nhãn (Tất cả bệnh lý)":
@@ -225,27 +295,53 @@ if uploaded_file is not None:
                     prob_ce = predict(model_ce, img_tensor) if model_ce else 0.0
                     prob_dam = predict(model_dam, img_tensor) if model_dam else 0.0
                     
+                    # Get interpretation for DAM (optimized model)
+                    interpretation_dam, icon_dam, _ = interpret_probability(prob_dam, threshold)
+                    
                     results.append({
                         "Bệnh lý": disease_vn,
                         "DAM (Tối ưu)": prob_dam,
-                        "CE (Cơ sở)": prob_ce
+                        "CE (Cơ sở)": prob_ce,
+                        "Đánh giá": f"{icon_dam} {interpretation_dam}"
                     })
                     
                     my_bar.progress((i + 1) / len(available_diseases_eng), text=f"Đã xử lý: {disease_vn}")
                 
-                my_bar.empty() # Remove progress bar when done
+                my_bar.empty()
+                
+                # Display summary
+                high_risk = [r for r in results if "Khả năng cao" in r["Đánh giá"]]
+                medium_risk = [r for r in results if "Cần theo dõi" in r["Đánh giá"]]
+                
+                if high_risk:
+                    st.error(f"⚠️ **Phát hiện {len(high_risk)} bệnh lý có khả năng cao:**")
+                    for r in high_risk:
+                        st.write(f"  • {r['Bệnh lý']}: {r['DAM (Tối ưu)']:.1%}")
+                elif medium_risk:
+                    st.warning(f"⚠️ **Có {len(medium_risk)} bệnh lý cần theo dõi**")
+                else:
+                    st.success("✅ **Tất cả các bệnh lý đều ở mức khả năng thấp**")
                 
                 # Display Results
                 df_results = pd.DataFrame(results).set_index("Bệnh lý")
                 
-                st.markdown("### Bảng Xác Suất Dự Đoán")
-                st.dataframe(df_results.style.format("{:.2%}"), use_container_width=True)
+                st.markdown("### 📊 Bảng Xác Suất Dự Đoán")
+                st.dataframe(
+                    df_results.style.format({
+                        "DAM (Tối ưu)": "{:.2%}",
+                        "CE (Cơ sở)": "{:.2%}"
+                    }),
+                    use_container_width=True
+                )
                 
-                st.markdown("### Biểu Đồ So Sánh Trực Quan")
-                st.bar_chart(df_results)
+                st.markdown("### 📈 Biểu Đồ So Sánh Trực Quan")
+                chart_data = df_results[["DAM (Tối ưu)", "CE (Cơ sở)"]]
+                st.bar_chart(chart_data)
                 
                 st.success("Dự đoán đa nhãn hoàn tất!")
-                st.info("Đã chạy ngầm tổng cộng {} mô hình để tạo ra kết quả đa nhãn (Multi-label) ở trên.".format(len(available_diseases_eng) * 2))
+                st.info(f"Đã chạy ngầm tổng cộng **{len(available_diseases_eng) * 2} mô hình** "
+                       f"để tạo ra kết quả đa nhãn (Multi-label). "
+                       f"Ngưỡng phân loại: **{threshold:.0%}**")
 
 else:
     st.info("Vui lòng tải ảnh lên từ thanh bên trái để bắt đầu.")
