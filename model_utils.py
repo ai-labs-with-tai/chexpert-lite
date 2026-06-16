@@ -14,6 +14,16 @@ def get_resnet50_model(num_classes=1):
     model.fc = nn.Linear(num_ftrs, num_classes)
     return model
 
+def get_densenet121_model(num_classes=5):
+    """
+    Returns a DenseNet121 model with the specified number of output classes.
+    For multi-label classification (5 diseases).
+    """
+    model = models.densenet121(weights=None)
+    num_ftrs = model.classifier.in_features
+    model.classifier = nn.Linear(num_ftrs, num_classes)
+    return model
+
 def load_weights(model, weights_path):
     """
     Loads weights into the model, handling potential 'module.' prefixes
@@ -38,15 +48,24 @@ def load_weights(model, weights_path):
         else:
             new_state_dict[k] = v
             
-    # Also handle the case where the saved model has a different number of classes in the FC layer.
-    # We will detect the size of the weight tensor for the fc layer.
+    # Handle the case where the saved model has a different number of classes
+    # For ResNet (fc layer)
     fc_weight_key = 'fc.weight'
-    if fc_weight_key in new_state_dict:
+    if fc_weight_key in new_state_dict and hasattr(model, 'fc'):
         out_features = new_state_dict[fc_weight_key].shape[0]
         if model.fc.out_features != out_features:
             print(f"Warning: Model FC output dimension mismatch. Expected {model.fc.out_features}, but weights have {out_features}. Adjusting model.")
             num_ftrs = model.fc.in_features
             model.fc = nn.Linear(num_ftrs, out_features)
+    
+    # For DenseNet (classifier layer)
+    classifier_weight_key = 'classifier.weight'
+    if classifier_weight_key in new_state_dict and hasattr(model, 'classifier'):
+        out_features = new_state_dict[classifier_weight_key].shape[0]
+        if model.classifier.out_features != out_features:
+            print(f"Warning: Model classifier output dimension mismatch. Expected {model.classifier.out_features}, but weights have {out_features}. Adjusting model.")
+            num_ftrs = model.classifier.in_features
+            model.classifier = nn.Linear(num_ftrs, out_features)
             
     model.load_state_dict(new_state_dict)
     model.eval()
@@ -57,8 +76,8 @@ def discover_diseases(base_dir):
     Scans the DAM directory to find available diseases.
     Assumes naming convention: {Disease}_latest.pth
     """
-    dam_dir = os.path.join(base_dir, "CheXpert_DAM", "DAM")
-    ce_dir = os.path.join(base_dir, "CheXpert_DAM", "CE")
+    dam_dir = os.path.join(base_dir, "CheXpert_DAM", "Resnet50", "DAM")
+    ce_dir = os.path.join(base_dir, "CheXpert_DAM", "Resnet50", "CE")
     
     diseases = set()
     if os.path.exists(dam_dir):
@@ -67,7 +86,7 @@ def discover_diseases(base_dir):
                 disease = filename.replace("_latest.pth", "")
                 diseases.add(disease)
                 
-    # Fallback to check CE dir if DAM is missing some (unlikely based on user prompt, but safe)
+    # Fallback to check CE dir if DAM is missing some
     if os.path.exists(ce_dir):
         for filename in os.listdir(ce_dir):
             if filename.startswith("CE_") and filename.endswith(".pth"):
@@ -108,3 +127,24 @@ def predict(model, image_tensor):
             probs = torch.softmax(outputs, dim=1)
             prob = probs[0][1].item() # Assuming class 1 is positive
     return prob
+
+def predict_multilabel(model, image_tensor):
+    """
+    Runs inference for multi-label classification and returns probabilities for all classes.
+    Returns a dictionary with disease names and their probabilities.
+    """
+    disease_names = [
+        'Cardiomegaly',
+        'Edema', 
+        'Consolidation',
+        'Atelectasis',
+        'Pleural Effusion'
+    ]
+    
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        # Apply sigmoid for multi-label classification
+        probs = torch.sigmoid(outputs).squeeze().cpu().numpy()
+        
+    # Return as dictionary
+    return {disease_names[i]: float(probs[i]) for i in range(len(disease_names))}
