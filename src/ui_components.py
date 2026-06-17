@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from src.config import DEFAULT_THRESHOLD, SUPPORTED_IMAGE_TYPES
-from src.disease_info import get_vn_name
+from src.disease_info import MULTILABEL_DISEASES, get_vn_name
 from src.prediction import interpret_probability
 
 
@@ -125,6 +125,8 @@ def build_interpreted_results(results, threshold):
             {
                 "Bệnh lý": get_vn_name(disease),
                 "Disease_EN": disease,
+                # Keep the original DenseNet output index because the display table is sorted later.
+                "Class_Index": MULTILABEL_DISEASES.index(disease),
                 "Xác suất": probability,
                 "Đánh giá": f"{icon} {interpretation}",
             }

@@ -14,14 +14,18 @@ class GradCAM:
         self.gradients = None
         self.activations = None
 
-        self.target_layer.register_forward_hook(self.save_activation)
-        self.target_layer.register_backward_hook(self.save_gradient)
+        self.forward_handle = self.target_layer.register_forward_hook(self.save_activation)
+        self.backward_handle = self.target_layer.register_full_backward_hook(self.save_gradient)
 
     def save_activation(self, module, input, output):
         self.activations = output.detach()
 
     def save_gradient(self, module, grad_input, grad_output):
         self.gradients = grad_output[0].detach()
+
+    def remove_hooks(self):
+        self.forward_handle.remove()
+        self.backward_handle.remove()
 
     def generate_cam(self, input_tensor, target_class=None):
         """Generate a normalized class activation map from model gradients."""
@@ -91,7 +95,10 @@ def generate_gradcam_visualization(model, image, image_tensor, class_idx=None):
     try:
         target_layer = get_gradcam_layer(model)
         gradcam = GradCAM(model, target_layer)
-        cam = gradcam.generate_cam(image_tensor, target_class=class_idx)
+        try:
+            cam = gradcam.generate_cam(image_tensor, target_class=class_idx)
+        finally:
+            gradcam.remove_hooks()
 
         overlay = apply_gradcam_overlay(image, cam, alpha=0.4)
 

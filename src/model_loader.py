@@ -119,12 +119,22 @@ def get_resnet50_weight_paths(disease, base_dir=None):
 
 def load_ce_model(disease, base_dir=None):
     ce_path, _ = get_resnet50_weight_paths(disease, base_dir)
+    if not os.path.exists(ce_path):
+        raise FileNotFoundError(
+            f"Không tìm thấy model CE cho bệnh {disease}.\n"
+            f"Đường dẫn cần kiểm tra: {ce_path}"
+        )
     model = get_resnet50_model()
     return load_weights(model, ce_path)
 
 
 def load_dam_model(disease, base_dir=None):
     _, dam_path = get_resnet50_weight_paths(disease, base_dir)
+    if not os.path.exists(dam_path):
+        raise FileNotFoundError(
+            f"Không tìm thấy model DAM cho bệnh {disease}.\n"
+            f"Đường dẫn cần kiểm tra: {dam_path}"
+        )
     model = get_resnet50_model()
     return load_weights(model, dam_path)
 
@@ -133,6 +143,12 @@ def load_densenet121_model(base_dir=None):
     model_path = DENSENET121_MODEL_PATH
     if base_dir is not None:
         model_path = os.path.join(base_dir, "CheXpert_DAM", "Densenet121", "best_densenet_exp1.pth")
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            "Không tìm thấy model DenseNet121 multi-label.\n"
+            f"Đường dẫn cần kiểm tra: {model_path}"
+        )
 
     model = get_densenet121_model(num_classes=5, use_dropout=True)
     return load_weights(model, model_path)

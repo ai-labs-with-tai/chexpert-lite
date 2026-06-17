@@ -55,7 +55,42 @@ def load_densenet121_model(base_path):
         return None
 
 
-def show_densenet121_prediction(image, image_tensor, threshold, enable_gradcam):
+def get_uploaded_file_id(uploaded_file):
+    if uploaded_file is None:
+        return None
+    return uploaded_file.name, uploaded_file.size
+
+
+def clear_prediction_state():
+    for key in ["last_prediction", "last_image", "last_image_tensor", "last_context", "last_threshold"]:
+        st.session_state.pop(key, None)
+
+
+def save_prediction_state(prediction, image, image_tensor, context, threshold):
+    st.session_state["last_prediction"] = prediction
+    st.session_state["last_image"] = image
+    st.session_state["last_image_tensor"] = image_tensor
+    st.session_state["last_context"] = context
+    st.session_state["last_threshold"] = threshold
+
+
+def show_saved_prediction(threshold, enable_gradcam):
+    prediction = st.session_state.get("last_prediction")
+    image = st.session_state.get("last_image")
+    image_tensor = st.session_state.get("last_image_tensor")
+
+    if prediction is None or image is None or image_tensor is None:
+        return
+
+    if prediction["type"] == "densenet121":
+        render_densenet121_prediction(image, image_tensor, prediction, threshold, enable_gradcam)
+    elif prediction["type"] == "resnet50_single":
+        render_single_disease_prediction(image, image_tensor, prediction, threshold, enable_gradcam)
+    elif prediction["type"] == "resnet50_all":
+        render_resnet50_all_diseases_results(prediction, threshold)
+
+
+def show_densenet121_prediction(image, image_tensor, threshold, enable_gradcam, context):
     with st.spinner("Đang tải mô hình DenseNet121 và dự đoán..."):
         model = load_densenet121_model(PROJECT_ROOT)
 
@@ -64,22 +99,29 @@ def show_densenet121_prediction(image, image_tensor, threshold, enable_gradcam):
             return
 
         results = predict_all_diseases(model, image_tensor)
-        interpreted_results = build_interpreted_results(results, threshold)
+        prediction = {"type": "densenet121", "results": results}
+        save_prediction_state(prediction, image, image_tensor, context, threshold)
 
-        display_multilabel_summary(interpreted_results, threshold)
-        display_multilabel_table_and_chart(interpreted_results)
-
-        if enable_gradcam:
-            show_densenet121_gradcam(model, image, image_tensor, interpreted_results)
-
-        st.success("Dự đoán đa nhãn hoàn tất!")
-        st.info(
-            "✨ **Mô hình DenseNet121** được huấn luyện để dự đoán đồng thời 5 bệnh lý từ một ảnh X-quang. "
-            f"Ngưỡng phân loại hiện tại: **{threshold:.0%}**"
-        )
+    render_densenet121_prediction(image, image_tensor, prediction, threshold, enable_gradcam)
 
 
-def show_densenet121_gradcam(model, image, image_tensor, interpreted_results):
+def render_densenet121_prediction(image, image_tensor, prediction, threshold, enable_gradcam):
+    interpreted_results = build_interpreted_results(prediction["results"], threshold)
+
+    display_multilabel_summary(interpreted_results, threshold)
+    display_multilabel_table_and_chart(interpreted_results)
+
+    if enable_gradcam:
+        show_densenet121_gradcam(image, image_tensor, interpreted_results)
+
+    st.success("Dự đoán đa nhãn hoàn tất!")
+    st.info(
+        "✨ **Mô hình DenseNet121** được huấn luyện để dự đoán đồng thời 5 bệnh lý từ một ảnh X-quang. "
+        f"Ngưỡng phân loại hiện tại: **{threshold:.0%}**"
+    )
+
+
+def show_densenet121_gradcam(image, image_tensor, interpreted_results):
     st.markdown("---")
     st.markdown("### 🔍 Grad-CAM: Vùng Mà Model Đang Chú Ý")
     st.info(
@@ -95,13 +137,22 @@ def show_densenet121_gradcam(model, image, image_tensor, interpreted_results):
         help="Chọn bệnh lý để xem vùng mà model chú ý cho bệnh đó",
     )
     selected_index = disease_names.index(selected_disease_gradcam)
+    selected_result = interpreted_results[selected_index]
+    class_idx = selected_result["Class_Index"]
+
+    if not st.button("Tạo Grad-CAM", key="create_densenet_gradcam"):
+        return
+
+    model = load_densenet121_model(PROJECT_ROOT)
+    if model is None:
+        return
 
     with st.spinner(f"Đang tạo Grad-CAM cho {selected_disease_gradcam}..."):
         overlay, heatmap, _ = generate_gradcam_visualization(
             model,
             image,
             image_tensor,
-            class_idx=selected_index,
+            class_idx=class_idx,
         )
 
         if overlay is None:
@@ -115,7 +166,7 @@ def show_densenet121_gradcam(model, image, image_tensor, interpreted_results):
         )
 
 
-def show_single_disease_prediction(image, image_tensor, selected_disease_eng, selected_disease_vn, threshold, enable_gradcam):
+def show_single_disease_prediction(image, image_tensor, selected_disease_eng, selected_disease_vn, threshold, enable_gradcam, context):
     with st.spinner("Đang tải mô hình và dự đoán..."):
         model_ce, model_dam = load_resnet50_models(selected_disease_eng, PROJECT_ROOT)
 
@@ -123,38 +174,64 @@ def show_single_disease_prediction(image, image_tensor, selected_disease_eng, se
             st.error("Không thể tải cả hai mô hình. Vui lòng kiểm tra lại các file trọng số.")
             return
 
-        res_cols = st.columns(2)
         prob_ce = None
         prob_dam = None
+        if model_ce:
+            prob_ce = predict_single_disease(model_ce, image_tensor)
+        if model_dam:
+            prob_dam = predict_single_disease(model_dam, image_tensor)
 
-        with res_cols[0]:
-            st.markdown("### 🟦 Baseline (CE)")
-            if model_ce:
-                prob_ce = predict_single_disease(model_ce, image_tensor)
-                display_probability_with_interpretation(prob_ce, threshold, "Xác suất")
-            else:
-                st.write("Mô hình không khả dụng.")
+        prediction = {
+            "type": "resnet50_single",
+            "disease_eng": selected_disease_eng,
+            "disease_vn": selected_disease_vn,
+            "has_ce_model": model_ce is not None,
+            "has_dam_model": model_dam is not None,
+            "prob_ce": prob_ce,
+            "prob_dam": prob_dam,
+        }
+        save_prediction_state(prediction, image, image_tensor, context, threshold)
 
-        with res_cols[1]:
-            st.markdown("### 🟧 Optimized (DAM)")
-            if model_dam:
-                prob_dam = predict_single_disease(model_dam, image_tensor)
-                display_probability_with_interpretation(prob_dam, threshold, "Xác suất")
-            else:
-                st.write("Mô hình không khả dụng.")
+    render_single_disease_prediction(image, image_tensor, prediction, threshold, enable_gradcam)
 
-        if prob_ce is not None and prob_dam is not None:
-            show_ce_dam_comparison(prob_ce, prob_dam)
 
-        if enable_gradcam and model_dam is not None:
-            show_resnet50_gradcam(model_ce, model_dam, image, image_tensor, selected_disease_vn, prob_ce, prob_dam)
+def render_single_disease_prediction(image, image_tensor, prediction, threshold, enable_gradcam):
+    prob_ce = prediction["prob_ce"]
+    prob_dam = prediction["prob_dam"]
+    selected_disease_vn = prediction["disease_vn"]
 
-        st.success("Dự đoán hoàn tất!")
-        st.info(
-            "💡 **Lưu ý:** Mô hình DAM được tối ưu hóa cho AUC (Area Under ROC Curve), "
-            "giúp phân định xác suất bệnh lý tốt hơn so với Cross-Entropy tiêu chuẩn. "
-            f"Ngưỡng phân loại hiện tại: **{threshold:.0%}**"
+    res_cols = st.columns(2)
+    with res_cols[0]:
+        st.markdown("### 🟦 Baseline (CE)")
+        if prediction["has_ce_model"]:
+            display_probability_with_interpretation(prob_ce, threshold, "Xác suất")
+        else:
+            st.write("Mô hình không khả dụng.")
+
+    with res_cols[1]:
+        st.markdown("### 🟧 Optimized (DAM)")
+        if prediction["has_dam_model"]:
+            display_probability_with_interpretation(prob_dam, threshold, "Xác suất")
+        else:
+            st.write("Mô hình không khả dụng.")
+
+    if prob_ce is not None and prob_dam is not None:
+        show_ce_dam_comparison(prob_ce, prob_dam)
+
+    if enable_gradcam and prediction["has_dam_model"]:
+        show_resnet50_gradcam(
+            prediction,
+            image,
+            image_tensor,
+            selected_disease_vn,
         )
+
+    st.success("Dự đoán hoàn tất!")
+    st.info(
+        "💡 **Lưu ý:** Mô hình DAM được tối ưu hóa cho AUC (Area Under ROC Curve), "
+        "giúp phân định xác suất bệnh lý tốt hơn so với Cross-Entropy tiêu chuẩn. "
+        f"Ngưỡng phân loại hiện tại: **{threshold:.0%}**"
+    )
 
 
 def show_ce_dam_comparison(prob_ce, prob_dam):
@@ -170,7 +247,7 @@ def show_ce_dam_comparison(prob_ce, prob_dam):
         st.warning(f"⚠️ Mô hình CE đánh giá xác suất cao hơn DAM: **+{abs(difference):.2%}**")
 
 
-def show_resnet50_gradcam(model_ce, model_dam, image, image_tensor, selected_disease_vn, prob_ce, prob_dam):
+def show_resnet50_gradcam(prediction, image, image_tensor, selected_disease_vn):
     st.markdown("---")
     st.markdown("### 🔍 Grad-CAM: Vùng Mà Model Đang Chú Ý")
     st.info(
@@ -178,7 +255,7 @@ def show_resnet50_gradcam(model_ce, model_dam, image, image_tensor, selected_dis
         "So sánh giữa 2 mô hình để thấy sự khác biệt trong cách nhìn của chúng."
     )
 
-    available_models = ["DAM (Optimized)", "CE (Baseline)"] if model_ce else ["DAM (Optimized)"]
+    available_models = ["DAM (Optimized)", "CE (Baseline)"] if prediction["has_ce_model"] else ["DAM (Optimized)"]
     model_col, _ = st.columns([1, 2])
 
     with model_col:
@@ -199,7 +276,15 @@ def show_resnet50_gradcam(model_ce, model_dam, image, image_tensor, selected_dis
             horizontal=True,
         )
 
+    if not st.button("Tạo Grad-CAM", key="create_resnet_gradcam"):
+        return
+
+    model_ce, model_dam = load_resnet50_models(prediction["disease_eng"], PROJECT_ROOT)
     selected_model = model_dam if "DAM" in st.session_state.gradcam_model_choice else model_ce
+
+    if selected_model is None:
+        st.error("Không thể tạo Grad-CAM vì model đã chọn không khả dụng.")
+        return
 
     with st.spinner(f"Đang tạo Grad-CAM cho {selected_disease_vn}..."):
         overlay, heatmap, _ = generate_gradcam_visualization(selected_model, image, image_tensor, class_idx=None)
@@ -209,7 +294,7 @@ def show_resnet50_gradcam(model_ce, model_dam, image, image_tensor, selected_dis
             return
 
         display_gradcam_images(image, heatmap, overlay)
-        prob_display = prob_dam if "DAM" in st.session_state.gradcam_model_choice else prob_ce
+        prob_display = prediction["prob_dam"] if "DAM" in st.session_state.gradcam_model_choice else prediction["prob_ce"]
         st.caption(
             f"🎯 Grad-CAM từ model **{st.session_state.gradcam_model_choice}** "
             f"cho bệnh lý: **{selected_disease_vn}** "
@@ -217,7 +302,7 @@ def show_resnet50_gradcam(model_ce, model_dam, image, image_tensor, selected_dis
         )
 
 
-def show_resnet50_all_diseases(image_tensor, available_diseases_eng, threshold):
+def show_resnet50_all_diseases(image, image_tensor, available_diseases_eng, threshold, context):
     progress_text = "Đang chạy dự đoán qua tất cả các mô hình..."
     progress_bar = st.progress(0, text=progress_text)
 
@@ -242,10 +327,13 @@ def show_resnet50_all_diseases(image_tensor, available_diseases_eng, threshold):
         progress_bar.progress((i + 1) / len(available_diseases_eng), text=f"Đã xử lý: {disease_vn}")
 
     progress_bar.empty()
-    display_resnet50_all_diseases_results(results, threshold)
+    prediction = {"type": "resnet50_all", "results": results}
+    save_prediction_state(prediction, image, image_tensor, context, threshold)
+    render_resnet50_all_diseases_results(prediction, threshold)
 
 
-def display_resnet50_all_diseases_results(results, threshold):
+def render_resnet50_all_diseases_results(prediction, threshold):
+    results = prediction["results"]
     high_risk = [row for row in results if "Khả năng cao" in row["Đánh giá"]]
     medium_risk = [row for row in results if "Cần theo dõi" in row["Đánh giá"]]
 
@@ -291,6 +379,15 @@ model_arch, mode, selected_disease_eng, selected_disease_vn, threshold, enable_g
     available_diseases_eng
 )
 
+current_context = (
+    model_arch,
+    mode,
+    selected_disease_eng,
+    get_uploaded_file_id(uploaded_file),
+)
+if st.session_state.get("last_context") is not None and st.session_state["last_context"] != current_context:
+    clear_prediction_state()
+
 show_page_title(model_arch, mode, selected_disease_vn)
 show_medical_disclaimer()
 
@@ -300,7 +397,12 @@ else:
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        image = Image.open(uploaded_file)
+        try:
+            image = Image.open(uploaded_file).convert("RGB")
+        except Exception:
+            st.error("Không thể đọc ảnh. Vui lòng chọn file JPG/PNG hợp lệ.")
+            st.stop()
+
         display_uploaded_image(image)
 
     with col2:
@@ -310,7 +412,7 @@ else:
             image_tensor = preprocess_image(image)
 
             if model_arch == "DenseNet121 (Multi-label)":
-                show_densenet121_prediction(image, image_tensor, threshold, enable_gradcam)
+                show_densenet121_prediction(image, image_tensor, threshold, enable_gradcam, current_context)
             elif mode == "Một Bệnh Lý (So sánh chi tiết)":
                 show_single_disease_prediction(
                     image,
@@ -319,6 +421,9 @@ else:
                     selected_disease_vn,
                     threshold,
                     enable_gradcam,
+                    current_context,
                 )
             elif mode == "Đa Nhãn (Tất cả bệnh lý)":
-                show_resnet50_all_diseases(image_tensor, available_diseases_eng, threshold)
+                show_resnet50_all_diseases(image, image_tensor, available_diseases_eng, threshold, current_context)
+        else:
+            show_saved_prediction(threshold, enable_gradcam)
